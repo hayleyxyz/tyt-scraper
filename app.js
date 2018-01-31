@@ -9,6 +9,7 @@ const util = require('util');
     let client = await CDP({ port: chrome.port });
 
     let linkDB = new LinkDB();
+    await linkDB.read();
 
     const { Page, DOM, Runtime } = client;
 
@@ -33,33 +34,44 @@ const util = require('util');
     await Page.navigate({ url: 'https://tytnetwork.com/category/aggressive-progressives-membership/' });
     await Page.loadEventFired();
 
-
-   async function scrapePage() {
+    async function scrapePage() {
        document = await DOM.getDocument();
 
        let linkNodes = await DOM.querySelectorAll({ selector: '.entry-title a', nodeId: document.root.nodeId });
+       let dateNodes = await DOM.querySelectorAll({ selector: '.entry-header time', nodeId: document.root.nodeId });
 
        for(let i = 0; i < linkNodes.nodeIds.length; i++) {
            let nodeId = linkNodes.nodeIds[i];
            let nodeAttrs = mapAttributeResponse(await DOM.getAttributes({ nodeId }));
-           linkDB.addLink(nodeAttrs.href);
+
+           let dateNodeId = dateNodes.nodeIds[i];
+           let dateNodeAttrs = mapAttributeResponse(await DOM.getAttributes({ nodeId: dateNodeId }));
+
+           linkDB.addLink(nodeAttrs.href, dateNodeAttrs.datetime);
+       }
+
+       if(!linkDB.shouldContinue) {
+           return;
        }
 
        let nextLink = await DOM.querySelector({ selector: '.x-pagination ul li:last-child a', nodeId: document.root.nodeId });
        if(nextLink.nodeId > 0) {
-           let nextAttrs = mapAttributeResponse(await DOM.getAttributes({nodeId: nextLink.nodeId}));
+           let nextAttrs = mapAttributeResponse(await DOM.getAttributes({ nodeId: nextLink.nodeId }));
 
-           await Page.navigate({url: nextAttrs.href});
+           await Page.navigate({ url: nextAttrs.href });
            await Page.loadEventFired();
            await scrapePage();
        }
-   }
+       else {
+           linkDB.finished = true;
+       }
+    }
 
-   await scrapePage();
+    if(!linkDB.finished) {
+        await scrapePage();
+        await linkDB.write();
+    }
 
-    console.log('next');
-
-    //console.log(util.inspect(client, { depth: null, colors: false, maxArrayLength: null }));
 
 })();
 
@@ -88,11 +100,55 @@ function mapAttributeResponse(attrArray) {
 class LinkDB {
 
     constructor() {
+        this.links = [];
+        this.finished = false;
 
+        this.shouldContinue = true;
     }
 
-    addLink(url) {
-
+    addLink(url, datetime) {
+        if(!this.hasLink(url)) {
+            this.links.push({ url, datetime });
+        }
+        else if(this.finished) {
+            this.shouldContinue = false;
+        }
     }
 
+    hasLink(url) {
+        for(let i = 0; i < this.links.length; i++) {
+            if(this.links[i].url === url) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    async read() {
+        return new Promise((accept, reject) => {
+            const fs = require('fs');
+            fs.readFile('links.json', (err, data) => {
+                if(err) {
+                    if(err.code === 'ENOENT') accept();
+                    else reject(err.message);
+                    return;
+                }
+
+                Object.assign(this, JSON.parse(data));
+
+                accept();
+            });
+        })
+    }
+
+    async write() {
+        return new Promise((accept, reject) => {
+            const fs = require('fs');
+            fs.writeFile('links.json', JSON.stringify(this, null, 2), (err) => {
+                if(err) reject(err);
+                else accept();
+            })
+        });
+    }
 }
